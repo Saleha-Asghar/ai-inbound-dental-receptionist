@@ -1,0 +1,359 @@
+{
+  "name": "Maya - Appointment Logger",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "maya-callback",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Maya Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -1264,
+        112
+      ],
+      "id": "c4b91a1c-156b-4572-a62d-d21fa52e2985",
+      "webhookId": "14549230-8121-4228-bc51-063f45340d85"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst eventType = body.message?.type || body.type || '';\n\n// Only process end-of-call-report\nif (eventType !== 'end-of-call-report') {\n  return [{ json: { skip: true, eventType } }];\n}\n\nconst message = body.message || body;\nconst callData = message.call || {};\nconst artifact = message.artifact || {};\nconst analysis = message.analysis || {};\n\n// Transcript\nconst transcript = artifact.transcript ||\n                   message.transcript ||\n                   'No transcript available';\nconst t = transcript.toLowerCase();\n\n// --- DURATION CALCULATION (BULLETPROOF) ---\nlet duration = 'N/A';\ntry {\n  // Search for start time in all possible VAPI locations\n  const startStr = callData.startedAt || callData.createdAt || message.startedAt || message.createdAt;\n  \n  // Search for end time in all possible VAPI locations\n  const endStr = callData.endedAt || message.endedAt;\n\n  if (startStr && endStr) {\n    const startMs = new Date(startStr).getTime();\n    const endMs = new Date(endStr).getTime();\n    const secs = Math.round((endMs - startMs) / 1000);\n\n    // Only set duration if we got a valid number greater than 0\n    if (!isNaN(secs) && secs >= 0) {\n      duration = `${Math.floor(secs / 60)}m ${secs % 60}s`;\n    }\n  }\n} catch(e) { \n  duration = 'Calc Error'; \n}\n\n// Core fields\nconst endedReason = callData.endedReason || message.endedReason || 'Unknown';\nconst recordingUrl = artifact.recordingUrl || artifact.stereoRecordingUrl || 'Not available';\nconst summary = analysis.summary || '';\n\n// --- EXTRACT PATIENT DETAILS FROM TRANSCRIPT ---\n\n// Patient Name\nlet patientName = 'Unknown';\nconst namePatterns = [\n  /my name is ([A-Za-z\\s]+)/i,\n  /i(?:'m| am) ([A-Za-z\\s]+)/i,\n  /this is ([A-Za-z\\s]+)/i,\n  /name(?:'s| is) ([A-Za-z\\s]+)/i,\n  /call me ([A-Za-z\\s]+)/i\n];\nfor (const pattern of namePatterns) {\n  const match = transcript.match(pattern);\n  if (match) {\n    patientName = match[1].trim().split(/\\s+/).slice(0, 2).join(' ');\n    patientName = patientName.replace(/[^a-zA-Z\\s]/g, '').trim();\n    if (patientName.length > 2) break;\n  }\n}\n\n// Patient type\nlet patientType = 'Unknown';\nif (t.includes('new patient') || t.includes('first time') || t.includes('never been')) {\n  patientType = 'New Patient';\n} else if (t.includes('existing') || t.includes('been before') || t.includes('visited before') || t.includes('came before')) {\n  patientType = 'Existing Patient';\n}\n\n// Reason for visit\nlet reasonForVisit = 'General Checkup';\nif (t.includes('whitening') || t.includes('whiten')) {\n  reasonForVisit = 'Teeth Whitening';\n} else if (t.includes('root canal')) {\n  reasonForVisit = 'Root Canal';\n} else if (t.includes('filling') || t.includes('cavity') || t.includes('cavities')) {\n  reasonForVisit = 'Filling / Cavity';\n} else if (t.includes('extraction') || t.includes('remove') || t.includes('pull out')) {\n  reasonForVisit = 'Tooth Extraction';\n} else if (t.includes('orthodon') || t.includes('braces') || t.includes('aligners')) {\n  reasonForVisit = 'Orthodontics Consultation';\n} else if (t.includes('emergency') || t.includes('severe pain') || t.includes('swelling') || t.includes('broken')) {\n  reasonForVisit = 'Emergency';\n} else if (t.includes('checkup') || t.includes('cleaning') || t.includes('routine')) {\n  reasonForVisit = 'General Checkup & Cleaning';\n}\n\n// Booking status\nlet bookingStatus = 'Incomplete';\nif (t.includes('cancel')) {\n  bookingStatus = 'Cancelled';\n} else if (t.includes('reschedule')) {\n  bookingStatus = 'Rescheduled';\n} else (\n  t.includes('booked') ||\n  t.includes('scheduled') ||\n  t.includes(\"we'll see you\") ||\n  t.includes('see you then') ||\n  t.includes('confirmed') ||\n  t.includes('appointment is set') ||\n  t.includes('look forward to seeing you')\n) {\n  bookingStatus = 'Booked';\n}\n\n// Emergency flag\nconst isEmergency = reasonForVisit === 'Emergency';\n\n// Raw date/time text for Gemini\nlet rawDateTimeText = '';\nconst dateKeywords = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday',\n  'today','tomorrow','morning','afternoon','evening','am','pm',\n  'january','february','march','april','may','june','july','august',\n  'september','october','november','december','next week','this week',\n  'o\\'clock','at ','on '];\n\nconst sentences = transcript.split(/[.!?]/);\nfor (const sentence of sentences) {\n  if (dateKeywords.some(k => sentence.toLowerCase().includes(k))) {\n    rawDateTimeText += sentence.trim() + '. ';\n  }\n}\nrawDateTimeText = rawDateTimeText.trim() || 'No specific date/time mentioned';\n\nreturn [{\n  json: {\n    skip: false,\n    timestamp: new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' }),\n    patientName,\n    patientType,\n    reasonForVisit,\n    bookingStatus,\n    isEmergency,\n    rawDateTimeText,\n    callDuration: duration,\n    endedReason,\n    summary,\n    fullTranscript: transcript,\n    recordingUrl\n  }\n}];"
+      },
+      "name": "Extract Appointment Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1040,
+        112
+      ],
+      "id": "8f2cd81e-8f58-4dfa-9cdd-cdbf03cf7a4b"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.skip }}"
+            }
+          ]
+        }
+      },
+      "name": "Should Process?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -816,
+        112
+      ],
+      "id": "b4e12c60-62fa-4314-87dd-f22916fa7269"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.bookingStatus }}",
+              "value2": "Booked"
+            }
+          ]
+        }
+      },
+      "name": "Was Appointment Booked?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -368,
+        32
+      ],
+      "id": "bc8fb77b-6b8b-409c-aab3-17b1f6bf0c47"
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "YOUR_CALENDAR_ID@group.calendar.google.com",
+          "mode": "id"
+        },
+        "start": "={{ $json.appointmentStart }}",
+        "end": "={{ $json.appointmentEnd }}",
+        "additionalFields": {
+          "description": "=Patient Type: {{ $json.patientType }}\nReason: {{ $json.reasonForVisit }}\nBooked via: Maya AI Receptionist\nCall Summary: {{ $json.summary }}\n\nFull Transcript:\n{{ $json.fullTranscript }}",
+          "summary": "={{ $json.reasonForVisit }} — {{ $json.patientType }}"
+        }
+      },
+      "name": "Create Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1,
+      "position": [
+        -144,
+        -64
+      ],
+      "id": "60393a50-de7a-4698-9637-0a1978bc9b08",
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "QtTmKkl3aITqpXh9",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",
+          "mode": "url"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Sheet1"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp": "={{ $json.timestamp }}",
+            "Patient Type": "={{ $json.patientType }}",
+            "Appointment DateTime": "={{ $json.readableDateTime }}",
+            "Booking Status": "={{ $json.bookingStatus }}",
+            "Call Duration": "={{ $json.callDuration }}",
+            "Full Transcript": "={{ $json.fullTranscript }}",
+            "Patient Name": "={{ $json.patientName }}",
+            "Reason for Visit ": "={{ $json.reasonForVisit }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Timestamp",
+              "displayName": "Timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Patient Name",
+              "displayName": "Patient Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Patient Type",
+              "displayName": "Patient Type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Reason for Visit ",
+              "displayName": "Reason for Visit ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Appointment DateTime",
+              "displayName": "Appointment DateTime",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Booking Status",
+              "displayName": "Booking Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Call Duration",
+              "displayName": "Call Duration",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Full Transcript",
+              "displayName": "Full Transcript",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -144,
+        128
+      ],
+      "id": "5122b0de-611f-41af-a455-d52ebe928c5e",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "n2bftoGUZmLFmqxj",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"received\": true }",
+        "options": {}
+      },
+      "name": "Respond to VAPI",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        80,
+        208
+      ],
+      "id": "8ef8e690-f7de-4ed2-9181-b4b41792f362"
+    },
+    {
+      "parameters": {
+        "jsCode": "const prevData = $input.first().json;\nconst rawDateTimeText = prevData.rawDateTimeText || 'No date mentioned';\nconst GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY_HERE';\nconst today = new Date().toISOString();\n\nconst requestBody = {\n  system_instruction: {\n    parts: [{\n      text: `You extract appointment date and time from natural language. Today is ${today}. Return ONLY a JSON object with this exact structure: {\"appointmentStart\": \"2026-06-27T10:00:00\", \"appointmentEnd\": \"2026-06-27T10:30:00\", \"readableDateTime\": \"Friday 27 June at 10:00 AM\", \"confidence\": \"high\"}. If no specific date found, use tomorrow at 10am and set confidence to low. Appointments are 30 minutes long.`\n    }]\n  },\n  contents: [{\n    role: 'user',\n    parts: [{\n      text: `Extract appointment date and time from: ${rawDateTimeText}`\n    }]\n  }],\n  generationConfig: {\n    response_mime_type: 'application/json'\n  }\n};\n\nlet parsedDate = {};\ntry {\n  const response = await $http.request({\n    method: 'POST',\n    url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`,\n    headers: {\n      'Content-Type': 'application/json',\n      'x-goog-api-key': GEMINI_API_KEY\n    },\n    body: requestBody,\n    json: true\n  });\n\n  const content = response.candidates[0].content.parts[0].text;\n  parsedDate = JSON.parse(content);\n} catch(e) {\n  // Fallback: tomorrow at 10am\n  const tomorrow = new Date();\n  tomorrow.setDate(tomorrow.getDate() + 1);\n  tomorrow.setHours(10, 0, 0, 0);\n  const end = new Date(tomorrow);\n  end.setMinutes(end.getMinutes() + 30);\n  parsedDate = {\n    appointmentStart: tomorrow.toISOString(),\n    appointmentEnd: end.toISOString(),\n    readableDateTime: 'Tomorrow at 10:00 AM',\n    confidence: 'low'\n  };\n}\n\nreturn [{\n  json: {\n    ...prevData,\n    appointmentStart: parsedDate.appointmentStart,\n    appointmentEnd: parsedDate.appointmentEnd,\n    readableDateTime: parsedDate.readableDateTime || 'Not parsed',\n    dateConfidence: parsedDate.confidence || 'low'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -592,
+        32
+      ],
+      "id": "aa7830a8-48bc-4c28-b35e-173186510d5e",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Maya Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract Appointment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Appointment Data": {
+      "main": [
+        [
+          {
+            "node": "Should Process?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Process?": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to VAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Was Appointment Booked?": {
+      "main": [
+        [
+          {
+            "node": "Create Calendar Event",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Calendar Event": {
+      "main": [
+        []
+      ]
+    },
+    "Log to Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Respond to VAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Was Appointment Booked?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "0279f973-e17d-410f-b1f5-30525e937c91",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4769e9b0007a7c5863212d08753ad00c2a6ce2744c78ba0bd08e2b80aac0ae53"
+  },
+  "nodeGroups": [],
+  "id": "uWWNmMiPuMeoEOAF",
+  "tags": []
+}
